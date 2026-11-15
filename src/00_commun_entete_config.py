@@ -4,11 +4,11 @@
 #
 # | Rôle | Membre | Sections |
 # |---|---|---|
-# | **Défenseur** | **Hamza Kalai** | 2 à 4 (données, protocole, modèles, seuil), 8 (défenses D1, D2, D3) |
-# | **Attaquant** | **Rayen Hassen** | 5 à 7 (modèle de menace, perturbations, attaques), 9 (attaques inédites, étiquette seule, transfert) |
+# | **Défenseur** | **Hamza Kalai** | 2 à 4 (données, protocole, modèles, seuil), 8 (défenses D1, D2, D3), 9.4 (défense D4, deuxième cycle) |
+# | **Attaquant** | **Rayen Hassen** | 5 à 7 (modèle de menace, perturbations, attaques), 9.1 à 9.3 (action inédite, étiquette seule, transfert) |
 # | Commun | les deux | 10 (évaluation finale), 11 (rapport) |
 #
-# Pour limiter le biais d'un binôme qui « connaît » les deux côtés, l'attaquant n'utilise que ce que le modèle de menace (section 5) l'autorise à savoir, et le défenseur choisit ses défenses **avant** de voir les attaques inédites de la section 9.
+# Pour limiter le biais d'un binôme qui « connaît » les deux côtés, l'attaquant n'utilise que ce que le modèle de menace (section 5) l'autorise à savoir, et le défenseur choisit ses défenses D1 à D3 **avant** de voir les attaques inédites de la section 9. Il y répond ensuite par un deuxième cycle (D4).
 #
 # ## 0. Problématique
 # Les détecteurs d'intrusion appris sur des jeux publics affichent souvent plus de 99 % de F1. Ces scores sont mesurés contre des attaques qui **ne cherchent pas à se cacher**. Un adversaire réel choisit son trafic : il peut ralentir, remplir ses paquets, insérer des pauses ou régler sa fenêtre TCP pour être classé « légitime » **sans perdre l'efficacité de son attaque**.
@@ -17,14 +17,14 @@
 # 1. **Q1 — Vulnérabilité.** Quel est le taux d'évasion d'un adversaire réaliste (variables contraintes, 1 000 requêtes au plus par flux) et comment le rappel chute-t-il avec l'amplitude ε autorisée ?
 # 2. **Q2 — Réalisme.** Les flux modifiés restent-ils physiquement cohérents ? De combien une attaque sans contrainte surestime-t-elle la menace ?
 # 3. **Q3 — Défense.** Trois durcissements (entraînement adverse, variables non manipulables, contraintes monotones) : quel gain de robustesse, à quel coût sur les performances normales ?
-# 4. **Q4 — Généralisation de la défense.** Les défenses résistent-elles à une attaque **qu'elles n'ont pas vue** : action inédite (fenêtre TCP), attaquant qui ne voit que la décision, attaque par transfert sans accès au modèle ?
+# 4. **Q4 — Généralisation de la défense.** Les défenses résistent-elles à une attaque **qu'elles n'ont pas vue** : action inédite (fenêtre TCP), attaquant qui ne voit que la décision, attaque par transfert sans accès au modèle ? Et que récupère-t-on en ré-entraînant une fois l'action connue (D4) ?
 #
 # > **Éthique.** Données publiques uniquement (CIC-IDS2017), aucune attaque contre un système réel. Les attaques agissent sur des vecteurs de statistiques de flux, pas sur du trafic réel. Elles servent à mesurer les faiblesses du détecteur pour mieux le protéger.
 
 # %% [markdown]
 # ## 1. Configuration et reproductibilité
 # - **Données** : téléchargées automatiquement (≈ 300 Mo) depuis un miroir Hugging Face des fichiers officiels `GeneratedLabelledFlows` (version *TrafficLabelling*, qui contient l'horodatage indispensable au découpage chronologique). Source officielle : Canadian Institute for Cybersecurity, <https://www.unb.ca/cic/datasets/ids-2017.html> (Sharafaldin et al., 2018). Les données brutes ne sont **pas** versionnées dans Git.
-# - `QUICK = True` : version réduite (quelques minutes) pour vérifier que tout s'exécute. `QUICK = False` : résultats du rapport (≈ 60 à 90 min sur un CPU à 2 cœurs).
+# - `QUICK = True` : version réduite (quelques minutes) pour vérifier que tout s'exécute. `QUICK = False` : résultats du rapport (≈ 25 min sur un CPU à 2 cœurs, davantage sur Colab).
 # - Toutes les graines dérivent de `SEED`. Les versions des bibliothèques sont imprimées ci-dessous et figées dans `requirements.txt`.
 
 # %%
@@ -39,7 +39,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
-from sklearn.model_selection import PredefinedSplit, RandomizedSearchCV, GridSearchCV, train_test_split
+from sklearn.model_selection import RandomizedSearchCV, GridSearchCV, train_test_split
 from sklearn.metrics import (precision_recall_fscore_support, average_precision_score, roc_auc_score,
                              confusion_matrix, ConfusionMatrixDisplay, precision_recall_curve)
 warnings.filterwarnings("ignore", category=UserWarning)
