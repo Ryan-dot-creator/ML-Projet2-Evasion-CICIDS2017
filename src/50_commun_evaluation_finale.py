@@ -34,7 +34,7 @@ fam_rec_test = pd.concat({n: family_recall(y_test, proba_test[n], ALL_MODELS[n][
 fam_rec_test.insert(0, "flux", family_recall(y_test, proba_test["XGBoost initial"], DEFENDERS["XGBoost initial"][1], fam_test)["flux"])
 print("Rappel par famille sur le test :"); display(fam_rec_test.round(3))
 fig, axs = plt.subplots(1, 3, figsize=(17, 4.2))
-for n in ["Baseline LR", "Forêt aléatoire", "XGBoost initial", "D1 entraînement adverse", "D2 non manipulables", "D3 monotone"]:
+for n in ["Baseline LR", "Forêt aléatoire"] + list(DEFENDERS):
     pr, rc, _ = precision_recall_curve(y_test, proba_test[n]); axs[0].plot(rc, pr, label=f"{n} ({average_precision_score(y_test, proba_test[n]):.4f})")
 axs[0].axhline(y_test.mean(), ls=":", c="grey", label="aléatoire"); axs[0].set(xlabel="Rappel", ylabel="Précision", title="Courbes PR (test)", ylim=(0, 1.02))
 axs[0].legend(fontsize=7)
@@ -81,7 +81,7 @@ curve_unc = summarize("XGBoost initial", "sans contrainte", EPS_GRID, ATTACK_SEE
 display(pd.concat(curves.values()).round(3))
 
 fig, axs = plt.subplots(1, 3, figsize=(18, 4.5)); x = np.arange(len(EPS_GRID))
-for (dn, c), mk in zip(curves.items(), ["o", "s", "D", "^"]):
+for (dn, c), mk in zip(curves.items(), ["o", "s", "D", "^", "v"]):
     axs[0].errorbar(x, c.rappel, yerr=c.rappel_std, marker=mk, capsize=3, label=dn); axs[0].fill_between(x, c.ic_lo, c.ic_hi, alpha=0.1)
     axs[1].plot(x, c.taux_evasion, marker=mk, label=dn); axs[2].plot(x, c.requetes_med, marker=mk, label=dn)
 axs[0].plot(x, curve_unc.rappel, "k--", marker="x", label="XGBoost initial — attaque SANS contrainte")
@@ -95,14 +95,14 @@ plt.tight_layout(); plt.savefig("fig_rappel_amplitude.png", dpi=150); plt.show()
 
 # %% [markdown]
 # ### 10.3 Matrice de robustesse : chaque défense face à chaque attaquant
-# Rappel sous attaque (équilibré par famille) à ε = 1 et ε = 5. « Sans attaque » = rappel à ε = 0 sur les mêmes flux. Les colonnes T2, étiquette seule et transfert sont des attaques **que les défenses n'ont pas vues**.
+# Rappel sous attaque (équilibré par famille) à ε = 1 et ε = 5. « Sans attaque » = rappel à ε = 0 sur les mêmes flux. Les colonnes T2, étiquette seule et transfert sont des attaques **que D1, D2 et D3 n'ont pas vues** ; D4 a été entraînée en connaissant T2.
 
 # %%
 EPS_MAT = [e for e in (1, 5) if e in EPS_GRID] or [EPS_GRID[-1]]
 mat_rows, t_all = [], time.time()
 transfer_X = {}
 for eps in EPS_MAT:     # l'attaquant fabrique ses flux contre SON substitut, sans requête au vrai détecteur
-    rs_ = evasion_attack(proba_fn(surrogate), Xa_t, eps, tau_surr, seed=SEED)
+    rs_ = evasion_attack(proba_fn(surrogate), Xa_t, eps, tau_surr, seed=SEED, stop_on_success=False)
     transfer_X[eps] = perturb(Xa_t, rs_["theta"])
 print(f"transfert construit ({time.time()-t_all:.0f}s)")
 for dn, (m, tau) in DEFENDERS.items():
@@ -117,7 +117,7 @@ robust = pd.DataFrame(mat_rows).set_index("défense")
 robust.insert(0, "F1 test (normal)", [res_test.loc[d, "f1_attack"] for d in robust.index])
 robust.insert(1, "fausses alertes / jour", [res_test.loc[d, "fausses alertes / jour (extrapolé)"] for d in robust.index])
 display(robust.round(3))
-fig, ax = plt.subplots(figsize=(13, 3.2))
+fig, ax = plt.subplots(figsize=(13, 3.8))
 mshow = robust.drop(columns=["F1 test (normal)", "fausses alertes / jour"])
 im = ax.imshow(mshow.to_numpy(dtype=float), cmap="RdYlGn", vmin=0, vmax=1, aspect="auto")
 ax.set_xticks(range(mshow.shape[1])); ax.set_xticklabels(mshow.columns, rotation=30, ha="right", fontsize=8)
@@ -135,7 +135,7 @@ def fam_table(eps):
     out["sans attaque"] = pd.Series(run("XGBoost initial", "T1", 0, ATTACK_SEEDS[0])["detected_after"], index=fam_a).groupby(level=0).mean()
     for dn in DEFENDERS:
         out[f"{dn} — T1"] = pd.Series(run(dn, "T1", eps, ATTACK_SEEDS[0])["detected_after"], index=fam_a).groupby(level=0).mean()
-    for dn in ["XGBoost initial", "D1 entraînement adverse", "D2 non manipulables"]:
+    for dn in ["XGBoost initial", "D1 entraînement adverse", "D2 non manipulables", "D4 entraînement adverse T1+T2"]:
         out[f"{dn} — T2"] = pd.Series(run(dn, "T2", eps, ATTACK_SEEDS[0])["detected_after"], index=fam_a).groupby(level=0).mean()
     return pd.DataFrame(out).round(2)
 for eps in EPS_MAT:
@@ -159,10 +159,13 @@ display(cost_df[cost_df.eps.isin(EPS_MAT)].round(2))
 
 # %%
 eps_r = EPS_MAT[0]
-print(f"T1, ε = {eps_r}, contre XGBoost initial :"); display(realism_report(Xa_t, perturb(Xa_t, run("XGBoost initial", "T1", eps_r, ATTACK_SEEDS[0])["theta"])))
-print(f"T2, ε = {eps_r}, contre D1 :"); display(realism_report(Xa_t, perturb_t2(Xa_t, run("D1 entraînement adverse", "T2", eps_r, ATTACK_SEEDS[0])["theta"]), NONMOD_T2))
+rep_t1 = realism_report(Xa_t, perturb(Xa_t, run("XGBoost initial", "T1", EPS_GRID[-1], ATTACK_SEEDS[0])["theta"]))
+print(f"T1, ε = {EPS_GRID[-1]} (amplitude maximale), contre XGBoost initial :"); display(rep_t1)
+rep_t2 = realism_report(Xa_t, perturb_t2(Xa_t, run("D1 entraînement adverse", "T2", eps_r, ATTACK_SEEDS[0])["theta"]), NONMOD_T2)
+print(f"T2, ε = {eps_r}, contre D1 :"); display(rep_t2)
 r_unc = run("XGBoost initial", "sans contrainte", eps_r, ATTACK_SEEDS[0])
-print(f"SANS contrainte, ε = {eps_r} :"); display(realism_report(Xa_t, MODES["sans contrainte"]["perturb_fn"](Xa_t, r_unc["theta"])))
+rep_unc = realism_report(Xa_t, MODES["sans contrainte"]["perturb_fn"](Xa_t, r_unc["theta"]))
+print(f"SANS contrainte, ε = {eps_r} :"); display(rep_unc)
 
 # %% [markdown]
 # ### 10.6 Vérification indépendante
@@ -177,12 +180,40 @@ for (dn, mode, eps, seed), r in RUNS.items():
         n_chk += 1
 print(f"Vérification OK sur {n_chk} exécutions d'attaque.")
 
+# %% [markdown]
+# ### 10.7 Analyse d'erreur : pourquoi la famille Bot n'est-elle pas détectée sur le test ?
+# Analyse faite **après** l'évaluation finale ; elle n'a servi à aucun choix. On compare les flux étiquetés `Bot` des trois fenêtres chronologiques. La documentation du CIC situe la session du botnet Ares entre 10:02 et 11:02 heure locale, soit 13:02–14:02 UTC (les horodatages de ce miroir sont en UTC).
+
 # %%
+bot = df[df["Label"] == "Bot"]
+def _bot_stats(g):
+    Xg = g[FEATURES].to_numpy(np.float32)
+    return pd.Series({"flux": len(g), "début (UTC)": g["Timestamp"].min().strftime("%H:%M"), "fin (UTC)": g["Timestamp"].max().strftime("%H:%M"),
+                      "charge utile aller médiane (o)": g["Total Length of Fwd Packets"].median(),
+                      "% sans charge utile aller": 100 * (g["Total Length of Fwd Packets"] == 0).mean(),
+                      "octets retour médians": g["Total Length of Bwd Packets"].median(),
+                      "durée médiane (s)": g["Flow Duration"].median() / 1e6,
+                      "fenêtre TCP retour médiane": g["Init_Win_bytes_backward"].median(),
+                      "% détectés (XGBoost initial)": 100 * (proba_fn(model_init)(Xg) >= DEFENDERS["XGBoost initial"][1]).mean()})
+bot_tab = pd.concat({s: _bot_stats(bot[bot["split"] == s]) for s in ["train", "val", "test"]}, axis=1)
+display(bot_tab)
+
+# %% [markdown]
+# **Lecture.** Les flux `Bot` du test commencent après la fin documentée de la session. Ils n'ont aucune charge utile dans le sens aller, durent environ une seconde et reçoivent une réponse minimale : ce profil est celui de **tentatives de connexion répétées vers un serveur de commande qui ne répond plus**, pas d'un échange avec le botnet. Le modèle a appris l'échange réel (train) et ne signale pas ces tentatives. Engelen et al. (2021) rangent ce type de flux dans une catégorie « tentative » et ne les comptent pas comme attaques. Le rappel nul sur Bot est donc d'abord un problème d'**étiquetage du jeu**, et il tire vers le bas le rappel « sans attaque » équilibré par famille.
+
+# %%
+def _tab(t): return json.loads(pd.DataFrame(t).to_json(orient="index", force_ascii=False))
 summary = {"config": {k: (v if not isinstance(v, tuple) else list(v)) for k, v in CONFIG.items()}, "eps_train": EPS_TRAIN,
+           "nettoyage": {k: int(v) for k, v in log.items()}, "n_variables": len(FEATURES), "n_flux_attaques": int(len(att_idx)),
            "hyperparametres": {k: {kk: (vv if not isinstance(vv, np.generic) else vv.item()) for kk, vv in v.items()} for k, v in best.items()},
            "seuils": {n: float(t) for n, (m, t) in ALL_MODELS.items()},
-           "test_normal": res_test.round(5).to_dict(orient="index"), "robustesse": robust.round(4).to_dict(orient="index"),
-           "courbes_T1": pd.concat(curves.values()).round(4).to_dict(orient="records"),
-           "courbe_sans_contrainte": curve_unc.round(4).to_dict(orient="records")}
-with open("resultats_projet2.json", "w") as f: json.dump(summary, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
+           "validation": _tab(res_val), "seuil_cout_validation": threshold_table(y_val, proba_val[DEF_NAME]).to_dict(orient="records"),
+           "decoupage_aleatoire": _tab(cmp), "defenses_validation": cand_tab.to_dict(orient="records"), "t2_validation": _tab(t2_val),
+           "rang_fenetre_tcp_substitut": int(WIN_RANK), "fenetre_par_famille": _tab(win_tab), "contraintes_monotones_libres": [c for c in FEATURES if direction[c] == 0 and FEAT_IDX[c] in T1_IDX],
+           "test_normal": _tab(res_test), "test_ic95": ci_rows, "rappel_famille_test": _tab(fam_rec_test),
+           "robustesse": _tab(robust), "courbes_T1": pd.concat(curves.values()).to_dict(orient="records"),
+           "courbe_sans_contrainte": curve_unc.to_dict(orient="records"),
+           "familles_sous_attaque": {str(e): _tab(fam_table(e)) for e in EPS_MAT}, "cout_attaquant": cost_df.to_dict(orient="records"),
+           "realisme": {"T1": _tab(rep_t1), "T2": _tab(rep_t2), "sans_contrainte": _tab(rep_unc)}, "bot": _tab(bot_tab.T.astype(str))}
+with open("resultats_projet2.json", "w") as f: json.dump(summary, f, indent=1, ensure_ascii=False, default=lambda o: o.item() if hasattr(o, "item") else str(o))
 print("Résultats : resultats_projet2.json, fig_rappel_amplitude.png, fig_matrice_robustesse.png, fig_test_pr_confusion.png")
