@@ -13,7 +13,9 @@
 # | **Remplir** (padding) | + θ₂ × max(taille moyenne des charges, 50) octets par paquet aller **portant déjà des données**, plafonné au MTU (1 460 o) | tailles de paquets, longueurs totales, statistiques de taille | bande passante supplémentaire |
 # | **Insérer une pause** | + θ₃ × (plus grand intervalle aller) dans cet intervalle | durée, intervalles max / moyen / écart-type | gratuit ; exige au moins 2 paquets aller |
 #
-# Les variables dérivées (débits, moyennes, écarts-types, extrêmes) sont **recalculées de façon cohérente** par `perturb` : l'attaquant choisit 3 actions de trafic, pas 59 valeurs indépendantes. Tout ce qui exigerait de changer la nature de l'attaque ou dépend de la cible (nombres de paquets, drapeaux TCP, sens retour, protocole, fenêtre TCP du serveur…) est **non modifiable** dans T1.
+# Les variables dérivées (débits, moyennes, écarts-types, extrêmes) sont **recalculées de façon cohérente** par `perturb` : l'attaquant choisit 3 actions de trafic, pas 61 valeurs indépendantes.
+#
+# **Borne physique : le délai d'expiration des flux.** CICFlowMeter coupe tout flux au bout de 120 s (durée maximale observée dans le jeu : 119,999998 s). Un flux étiré au-delà serait découpé en plusieurs enregistrements : ce ne serait plus le même vecteur. `perturb` plafonne donc la pause et la dilatation pour que la durée finale ne dépasse jamais 120 s (ou la durée d'origine). Conséquence : les attaques déjà longues (médianes des flux bruts : DoS Hulk 85 s, slowloris 97 s, Slowhttptest 63 s) ont très peu de marge de ralentissement, quel que soit ε. Tout ce qui exigerait de changer la nature de l'attaque ou dépend de la cible (nombres de paquets, drapeaux TCP, sens retour, protocole, fenêtre TCP du serveur…) est **non modifiable** dans T1.
 #
 # **Modèle de menace T2 (inconnu du défenseur, section 9.1).** T1 + une quatrième action réaliste : **choisir la fenêtre TCP initiale** annoncée dans son SYN (`Init_Win_bytes_forward`, réglable par `SO_RCVBUF` ou une pile réseau brute, entre 0 et 65 535 sans option d'échelle). T1 l'excluait volontairement : c'est ce qui permet de tester si une défense tient face à ce qu'elle n'a **pas anticipé** (piège « durcissement évalué seulement contre l'attaque connue »).
 #
@@ -23,7 +25,7 @@
 # | DoS Hulk, GoldenEye, DDoS (inondations HTTP) | oui, **si** l'attaquant ouvre plus de connexions en parallèle : le détecteur raisonne flux par flux, le débit agrégé peut être conservé | oui (augmente même le volume) | coût réel : plus de sockets / de machines (bots) |
 # | slowloris, Slowhttptest | oui : ces attaques **exploitent** la lenteur | oui (en-têtes HTTP) | limite : délais d'expiration du serveur |
 # | FTP-/SSH-Patator (force brute) | oui, coût linéaire en essais par seconde (compensable par plus de flux) | SSH : oui (remplissage aléatoire prévu par le protocole, RFC 4253) ; FTP : limité | |
-# | PortScan | peu utile : flux de 1 à 2 paquets | non (pas de charge utile) ; pause impossible (< 2 paquets aller) | robustesse attendue par construction |
+# | PortScan | peu utile sur la sonde typique (1 paquet aller, 47 µs en médiane) | non pour la sonde typique (pas de charge utile, pause impossible avec moins de 2 paquets aller) | attention : 98,8 % des flux PortScan sont des doublons exacts de ces sondes ; après dédoublonnage il reste surtout des flux atypiques (75 % ont au moins 2 paquets aller, 43 % une charge utile), qui, eux, sont manipulables |
 # | Bot (Ares), attaques Web | oui (balises C2 plus espacées = plus discrètes) | oui (en-têtes, paramètres) | |
 #
 # Le coût réel (allongement de durée, surcoût en octets) de chaque évasion réussie est mesuré par famille en section 10.4.
@@ -57,6 +59,7 @@ NONMOD_T2 = [j for j in NONMOD_T1 if FEATURES[j] != WIN_FEAT]
 
 # %%
 MTU_PAYLOAD = 1460
+FLOW_TIMEOUT = 120e6          # µs : délai d'expiration des flux de CICFlowMeter (valeur par défaut, vérifiée sur le jeu)
 def _g(X, name):
     j = FEAT_IDX.get(name)
     return X[:, j].astype(np.float64) if j is not None else np.zeros(len(X))
@@ -108,7 +111,9 @@ def perturb(X0, theta):
     # 2. pause : le plus grand intervalle aller est allongé de delta
     fi_tot, fi_max, fi_mean, fi_std = (_g(X0, 'Fwd IAT Total'), _g(X0, 'Fwd IAT Max'), _g(X0, 'Fwd IAT Mean'), _g(X0, 'Fwd IAT Std'))
     i_max, i_mean, i_std = _g(X0, 'Flow IAT Max'), _g(X0, 'Flow IAT Mean'), _g(X0, 'Flow IAT Std')
-    delta = np.where(nf >= 2, th_j * fi_max, 0.0); paused = delta > 0
+    cap = np.maximum(dur0, FLOW_TIMEOUT)                            # un flux ne peut pas dépasser le délai d'expiration
+    delta = np.where(nf >= 2, th_j * fi_max, 0.0)
+    delta = np.minimum(delta, cap - dur0); paused = delta > 0
     m2, s2 = _iat_stats(i_mean, i_std, delta, fi_max, np.maximum(N - 1, 1))
     fm2, fs2 = _iat_stats(fi_mean, fi_std, delta, fi_max, np.maximum(nf - 1, 1))
     _p(X, 'Flow Duration', dur0 + delta)
@@ -117,7 +122,7 @@ def perturb(X0, theta):
     _p(X, 'Fwd IAT Total', fi_tot + delta);                _p(X, 'Fwd IAT Max', fi_max + delta)
     _p(X, 'Fwd IAT Mean', np.where(paused, fm2, fi_mean)); _p(X, 'Fwd IAT Std', np.where(paused, fs2, fi_std))
     # 3. ralentissement : dilatation uniforme du temps
-    D = 1.0 + th_d
+    D = np.maximum(1.0, np.minimum(1.0 + th_d, _div(cap, dur0 + delta, np.inf)))   # durée finale <= 120 s
     for c in TIME_FEATS:
         if c in FEAT_IDX: X[:, FEAT_IDX[c]] *= D
     # 4. débits recalculés (rapport nouveau / ancien : identité exacte si theta = 0)
@@ -142,10 +147,14 @@ def perturb_t2(X0, theta):
 _s = X_val[y_val == 1][:500]
 print("perturb(θ = 0) == identité :", np.allclose(perturb(_s, np.zeros((len(_s), 3))), _s, rtol=1e-5, atol=1e-3))
 print("perturb_t2(θ = 0) == identité :", np.allclose(perturb_t2(_s, np.zeros((len(_s), 4))), _s, rtol=1e-5, atol=1e-3))
+_big = perturb(_s, np.full((len(_s), 3), 50.0))[:, FEAT_IDX["Flow Duration"]]
+print("durée finale <= max(120 s, durée d'origine) même pour θ = 50 :", bool((_big <= np.maximum(_s[:, FEAT_IDX["Flow Duration"]], FLOW_TIMEOUT) * (1 + 1e-6)).all()))
 
 # %% [markdown]
 # ### 6.2 Invariants physiques
 # Un flux modifié est jugé réaliste s'il **n'augmente pas** le taux de violation d'invariants que respecte tout flux réel (les flux d'origine en violent déjà quelques-uns : artefacts de CICFlowMeter), et s'il ne touche **aucune** variable hors du modèle de menace.
+#
+# **Ce que ces invariants ne garantissent pas.** Ils sont nécessaires, pas suffisants : les écarts-types et extrêmes recalculés sont des approximations (on ne connaît pas les paquets, seulement leurs statistiques), et CICFlowMeter sépare périodes actives et inactives par un seuil de 5 s que la dilatation peut faire franchir. Les variables `Active` / `Idle` sont simplement mises à l'échelle.
 
 # %%
 def violations(X, X0=None, allowed_nonmod=NONMOD_T1):
@@ -164,6 +173,7 @@ def violations(X, X0=None, allowed_nonmod=NONMOD_T1):
     out["débit octets/s ≈ octets / durée"] = (dur > 0) & ((tf + tb) > 0) & (np.abs(_g(X, 'Flow Bytes/s') * dur / 1e6 - (tf + tb)) > 0.05 * (tf + tb) + 1)
     out["taille max globale ≥ taille max aller"] = _g(X, 'Max Packet Length') < fmax - tol(fmax)
     out["fenêtre TCP hors [-1, 65 535]"] = (_g(X, WIN_FEAT) < -1) | (_g(X, WIN_FEAT) > 65535)
+    out["durée > 120 s (délai d'expiration des flux)"] = dur > FLOW_TIMEOUT + 1
     if X0 is not None:
         X0 = np.asarray(X0, dtype=np.float64)
         out["charge utile aller > max(MTU, valeur initiale)"] = fmax > np.maximum(_g(X0, 'Fwd Packet Length Max'), MTU_PAYLOAD) + 1e-6
@@ -193,7 +203,7 @@ def realism_report(X0, X1, allowed_nonmod=NONMOD_T1):
 
 # %%
 def evasion_attack(predict_fn, X0, eps, tau, *, perturb_fn=perturb, dim=3, free_dims=(), symmetric=False, hard_label=False,
-                   budget=BUDGET, explore=0.3, sigma=0.25, mut_prob=1.0, seed=0):
+                   budget=BUDGET, explore=0.3, sigma=0.25, mut_prob=1.0, stop_on_success=True, seed=0):
     rng = np.random.default_rng(seed)
     X0 = np.asarray(X0, dtype=np.float32); n = len(X0)
     lo = np.full(dim, -min(eps, 1.0) if symmetric else 0.0); hi = np.full(dim, float(eps))
@@ -216,7 +226,7 @@ def evasion_attack(predict_fn, X0, eps, tau, *, perturb_fn=perturb, dim=3, free_
         s = query(perturb_fn(X0[ii], cand)); q[ii] += 1
         imp = s < best_s[ii]; jj = ii[imp]
         best_s[jj], best_th[jj] = s[imp], cand[imp]
-        active[ii[s < tau]] = False
+        if stop_on_success: active[ii[s < tau]] = False      # sinon : on continue à creuser la marge sous le seuil
     final = predict_fn(perturb_fn(X0, best_th)) if (hi - lo).max() > 0 else score0
     return dict(theta=best_th, score=final, score0=score0, queries=q, init_detected=init_detected,
                 success=init_detected & (final < tau), detected_after=final >= tau)
